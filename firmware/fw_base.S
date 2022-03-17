@@ -58,29 +58,71 @@ _start:
 	bne	a0, a6, _wait_relocate_copy_done
 _try_lottery:
 	/* Jump to relocation wait loop if we don't get relocation lottery */
-	lla	a6, _relocate_lottery
+	lla	a6, _relocate_lottery  /*将_relocate_lottery地址加载到a6寄存器，a6寄存器地址中的值为0，lla是伪指令*/
 	li	a7, 1
-	amoadd.w a6, a7, (a6)
+	/*先将(a6)的值赋值给a6，然后a6+a7的值赋值给(a6), 这里_relocate_lottery被设置为1*/
+	amoadd.w a6, a7, (a6) 
+	/*a6为0，不会跳转到_wait_relocate_copy_done*/
 	bnez	a6, _wait_relocate_copy_done
 
 	/* Save load address */
+	/*
+	_load_start 用来存储_fw_start的值,可以理解为程序加载地址，
+	 在generic中，_fw_start值为0x80000000
+	*/
 	lla	t0, _load_start
 	lla	t1, _fw_start
 	REG_S	t1, 0(t0)
-
+/*
+FW_PIC：此选项开启的话，OpenSBI将直接运行在加载地址，而不需要任何代码移动。
+	这个选项需要一个支持PIE的工具链，默认情况下是开启的。
+*/
 #ifdef FW_PIC
 	/* relocate the global table content */
+	/*
+	_link_start:链接地址.
+	链接地址：在编译链接时指定的地址，编程人员设想将来程序要运行的地址。
+	虚拟地址：对于每个进程来说都是认为自己用于所有的地址空间，这个地址空间就是虚拟地址。
+	加载地址：代码存储的物理地址。
+	下面两条指令将_link_start地址中存放的值，加载到t0中，t0为0x80000000
+	*/
 	lla	t0, _link_start
 	REG_L	t0, 0(t0)
 	/* t1 shall has the address of _fw_start */
+	/*t1(加载地址) - t0(链接地址) -> t2 (加载地址和链接地址offset),此时t2为0*/
 	sub	t2, t1, t0
+	/*_runtime_offset存储offset ，此时为0*/
 	lla	t3, _runtime_offset
 	REG_S	t2, (t3)
+	/*
+	如果__rel_dyn_start和__rel_dyn_end不相等，说明有需要重定位的代码
+	.rela.dyn: Runtime/Dynamic relocation table.
+		为了让动态链接器确定是对哪个符号进行重定位,需要使用.rela.dyn来存储信息.
+		对于动态二进制文件，这个重定位表保存了在加载时必须重定位的变量信息。该表
+		中的每个条目都是一个Elf64_Rela结构体(参见/usr/include/elf.h)，它只有三个成员:
+		offset:可变值(通常是位置无关的)虚拟内存地址，在重定位过程中保存“patched”值
+		info:(Index into .dynsym section and Relocation Type)
+		addend:附加
+		结构体：
+		typedef struct
+		{
+		Elf64_Addr	r_offset;		//Address 
+		Elf64_Xword	r_info;			//Relocation type and symbol index
+		Elf64_Sxword	r_addend; 	//Addend 
+		} Elf64_Rela;
+		每个部分占用8字节，刚好是24字节。
+		
+	参考：https://zhuanlan.zhihu.com/p/77264742
+		https://stevens.netmeister.org/631/elf.html
+	*/
 	lla	t0, __rel_dyn_start
 	lla	t1, __rel_dyn_end
+	/*beq表示t0和t1相等则跳转到_relocate_done，这里t0和t1不相等*/
 	beq	t0, t1, _relocate_done
-	j	5f
+	/*执行到这里*/
+	j	5f 
 2:
+	/**/
 	REG_L	t5, -(REGBYTES*2)(t0)	/* t5 <-- relocation info:type */
 	li	t3, R_RISCV_RELATIVE	/* reloc type R_RISCV_RELATIVE */
 	bne	t5, t3, 3f
@@ -114,7 +156,9 @@ _try_lottery:
 	REG_S	t5, 0(t3)		/* store runtime address to the variable */
 
 5:
+	/*RV64中 REGBYTES等于8，t0等于__rel_dyn_start， t0+=24*/
 	addi	t0, t0, (REGBYTES*3)
+	/*t0 <= t1则跳转到 2b处*/
 	ble	t0, t1, 2b
 	j	_relocate_done
 _wait_relocate_copy_done:
