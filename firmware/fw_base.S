@@ -111,7 +111,7 @@ FW_PIC：此选项开启的话，OpenSBI将直接运行在加载地址，而不�
 		Elf64_Sxword	r_addend; 	//Addend 
 		} Elf64_Rela;
 		每个部分占用8字节，刚好是24字节。
-		
+
 	参考：https://zhuanlan.zhihu.com/p/77264742
 		https://stevens.netmeister.org/631/elf.html
 	*/
@@ -121,41 +121,83 @@ FW_PIC：此选项开启的话，OpenSBI将直接运行在加载地址，而不�
 	beq	t0, t1, _relocate_done
 	/*执行到这里*/
 	j	5f 
-2:
-	/**/
+2:  /*判断.rele.dyn每个条目的类型*/
 	REG_L	t5, -(REGBYTES*2)(t0)	/* t5 <-- relocation info:type */
 	li	t3, R_RISCV_RELATIVE	/* reloc type R_RISCV_RELATIVE */
+	/*如果type不是R_RISCV_RELATIVE，则跳转到3f*/
 	bne	t5, t3, 3f
-	REG_L	t3, -(REGBYTES*3)(t0)
-	REG_L	t5, -(REGBYTES)(t0)	/* t5 <-- addend */
-	add	t5, t5, t2
+	/*
+		当 type为R_RISCV_RELATIVE，程序走这里
+		以第一个条目为例
+		t3是r_offset 0x800160c0
+		t5是r_addend 0x80000d40
+		将运行时地址存放在Got表项中
+	*/
+	REG_L	t3, -(REGBYTES*3)(t0)  /*将r_offset加载到t3中*/
+	REG_L	t5, -(REGBYTES)(t0)	/* t5 <-- r_addend */
+	add	t5, t5, t2   /*t2(加载地址-链接地址= offset),t2是0*/
 	add	t3, t3, t2
 	REG_S	t5, 0(t3)		/* store runtime address to the GOT entry */
 	j	5f
 
 3:
+	/*读取__dyn_sym_start起始地址到t4*/
 	lla	t4, __dyn_sym_start
 
-4:
+4:/*此时读取的.rely.dyn的type为R_RISCV_64
+$ riscv64-linux-gnu-readelf -rW build/platform/generic/firmware/fw_payload.elf
+    Offset             Info             Type               Symbol's Value  Symbol's Name + Addend
+0000000080017120  0000000000000003 R_RISCV_RELATIVE                          80016590
+0000000080016798  0000000200000002 R_RISCV_64             00000000800168c8 fdt_serial_uart8250 + 0
+0000000080016a08  0000002100000002 R_RISCV_64             0000000080016ac8 fdt_poweroff_gpio + 0
+*/
+	/*读取.rely.dyn中的r_info信息，r_info为0x200000002*/
 	REG_L	t5, -(REGBYTES*2)(t0)	/* t5 <-- relocation info:type */
+	/*将t5的值逻辑右移0x20位，t6则为0x2,即sym table index为2。在sym table中的第几个条目*/
 	srli	t6, t5, SYM_INDEX	/* t6 <--- sym table index */
+	/*t5为0x2，即relocation type为2*/
 	andi	t5, t5, 0xFF		/* t5 <--- relocation type */
+	/*RELOC_TYPE在64位系统里面为2，t3为2*/
 	li	t3, RELOC_TYPE
+	/*t3和t5不等才会跳转到5f*/
 	bne	t5, t3, 5f
 
 	/* address R_RISCV_64 or R_RISCV_32 cases*/
+	/*加载r_offset到t3，即t3=0x80016798*/
 	REG_L	t3, -(REGBYTES*3)(t0)
+	/*RV64中SYM_SIZE=24,t5=24*/
 	li	t5, SYM_SIZE
+	/*t6=t5*t6 = 24*2 = 48*/
 	mul	t6, t6, t5
+	/*s5 = t4为.dynsym的起始地址 + t6 */
 	add	s5, t4, t6
+	/*t0=.rely.dyn 中的r_addend 为0*/
 	REG_L	t6, -(REGBYTES)(t0)	/* t0 <-- addend */
+	/*RV64中，REGBYTES=8，从s5+8地址处读取内存数据到t5中，t5为st_value: 0x800168c8*/
 	REG_L	t5, REGBYTES(s5)
+	/*t6(r_addend) + t5(st_value) = 0+0x800168c8*/
 	add	t5, t5, t6
+	/*t2(加载地址-链接地址= offset) = 0*/
 	add	t5, t5, t2		/* t5 <-- location to fix up in RAM */
 	add	t3, t3, t2		/* t3 <-- location to fix up in RAM */
-	REG_S	t5, 0(t3)		/* store runtime address to the variable */
+	/*将t5(st_value) 存储到t3(r_offset)地址中
+	t5寄存器的值如下
+	(gdb) x 0x800168c8
+	0x800168c8 <fdt_serial_uart8250>:       0x800168d8
 
-5:
+	t3寄存器的值如下
+	(gdb) x 0x80016798
+	0x80016798 <serial_drivers>:    0x00000000
+	这里将0x800168c8存储到0x80016798对应的内存中，完成动态链接
+	*/
+	REG_S	t5, 0(t3)		/* store runtime address to the variable */
+	/*
+	(gdb) x 0x80016798
+	0x80016798 <serial_drivers>:    0x800168c8
+	*/
+
+
+5:  /*这里是在遍历.rela.dyn section*/
 	/*RV64中 REGBYTES等于8，t0等于__rel_dyn_start， t0+=24*/
 	addi	t0, t0, (REGBYTES*3)
 	/*t0 <= t1则跳转到 2b处*/
