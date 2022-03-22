@@ -48,6 +48,10 @@
 	.globl _start_warm
 _start:
 	/* Find preferred boot HART id */
+	/*
+	1.hardid通过a0寄存器传递。
+	2.通过a1寄存器在内存中的设备树blob地址。地址必须对齐到8个字节。
+	*/
 	MOV_3R	s0, a0, s1, a1, s2, a2
 	call	fw_boot_hart
 	add	a6, a0, zero
@@ -292,13 +296,15 @@ _relocate_done:
 	sub	t0, t0, t1
 	add	t0, t0, t2
 #endif
+	/*将BOOT_STATUS_RELOCATE_DONE写入到_boot_status中*/
 	li	t1, BOOT_STATUS_RELOCATE_DONE
 	REG_S	t1, 0(t0)
 	fence	rw, rw
 
 	/* At this point we are running from link address */
-
+	/*从这里开始我们将运行在链接地址上*/
 	/* Reset all registers for boot HART */
+	/*所有寄存器设置为0,除了ra, a0, a1 and a2 */
 	li	ra, 0
 	call	_reset_regs
 
@@ -311,6 +317,7 @@ _bss_zero:
 	blt	s4, s5, _bss_zero
 
 	/* Setup temporary trap handler */
+	/*设置临时trap处理程序_start_hang,此函数说明都不做，只调用wfi*/
 	lla	s4, _start_hang
 	csrw	CSR_MTVEC, s4
 
@@ -335,6 +342,7 @@ _bss_zero:
 	 * firmware are parameters to this function.
 	 */
 	MOV_5R	s0, a0, s1, a1, s2, a2, s3, a3, s4, a4
+	/*跳转到platform.c中的fw_platform_init执行*/
 	call	fw_platform_init
 	add	t0, a0, zero
 	MOV_5R	a0, s0, a1, s1, a2, s2, a3, s3, a4, s4
@@ -344,6 +352,10 @@ _bss_zero:
 	 * s7 -> HART Count
 	 * s8 -> HART Stack Size
 	 */
+	/*从platform结构体中获取hart count和stack大小
+	hart count  = 1
+	stack size  = 8192
+	*/
 	lla	a4, platform
 #if __riscv_xlen == 64
 	lwu	s7, SBI_PLATFORM_HART_COUNT_OFFSET(a4)
@@ -354,6 +366,7 @@ _bss_zero:
 #endif
 
 	/* Setup scratch space for all the HARTs*/
+	/*为所有的hart分配临时空间,hart count乘以stack size,scratch space在紧随_fw_end*/
 	lla	tp, _fw_end
 	mul	a5, s7, s8
 	add	tp, tp, a5
@@ -372,6 +385,13 @@ _scratch_init:
 	 * s7 -> HART count
 	 * s8 -> HART stack size
 	 */
+	/*
+	存储数据到scratch sapce中
+	t3为scratch space尾部地址
+	s8为栈空间大小,即8KB
+	t1等于0，为hartid
+	SBI_SCRATCH_SIZE 为4KB
+	*/
 	add	tp, t3, zero
 	mul	a5, s8, t1
 	sub	tp, tp, a5
@@ -424,6 +444,7 @@ _scratch_init:
 	MOV_3R	a0, s0, a1, s1, a2, s2
 	/* Move to next scratch space */
 	add	t1, t1, t2
+	/*s7为hart count，这里t1<s7则继续存储数据到scratch space*/
 	blt	t1, s7, _scratch_init
 
 	/*
@@ -434,6 +455,9 @@ _scratch_init:
 	 * Note: We will preserve a0 and a1 passed by
 	 * previous booting stage.
 	 */
+	/*重定位FDT
+	
+	*/
 	beqz	a1, _fdt_reloc_done
 	/* Mask values in a4 */
 	li	a4, 0xff
@@ -477,6 +501,7 @@ _scratch_init:
 	add	t2, t1, t2
 	/* FDT copy loop */
 	ble	t2, t1, _fdt_reloc_done
+	/*在virt平台上将FDT从地址0x1020拷贝到0x82200000上，大小为0xd1a*/
 _fdt_reloc_again:
 	REG_L	t3, 0(t0)
 	REG_S	t3, 0(t1)
@@ -521,9 +546,17 @@ _start_warm:
 	lw	s7, SBI_PLATFORM_HART_COUNT_OFFSET(a4)
 	lw	s8, SBI_PLATFORM_HART_STACK_SIZE_OFFSET(a4)
 #endif
+	/*在fw_platform_init函数中对index2id进行了初始化index2id[0] = 0
+	#define SBI_PLATFORM_HART_INDEX2ID_OFFSET (0x58 + (__SIZEOF_POINTER__ * 2))
+	__SIZEOF_POINTER__ = 8
+	SBI_PLATFORM_HART_INDEX2ID_OFFSET = 0x58+16
+
+	s9存放generic_hart_index2id的地址
+	*/
 	REG_L	s9, SBI_PLATFORM_HART_INDEX2ID_OFFSET(a4)
 
 	/* Find HART id */
+	/*hart id = 0*/
 	csrr	s6, CSR_MHARTID
 
 	/* Find HART index */
@@ -531,19 +564,29 @@ _start_warm:
 	li	a4, 0
 1:
 #if __riscv_xlen == 64
+	/*a5 存放platform中读取到的hart id,为0*/
 	lwu	a5, (s9)
 #else
 	lw	a5, (s9)
 #endif
+	/*a5和s6相等，跳转到2f*/
 	beq	a5, s6, 2f
 	add	s9, s9, 4
 	add	a4, a4, 1
 	blt	a4, s7, 1b
 	li	a4, -1
+	/*a4+zero -> s6 为 0*/
 2:	add	s6, a4, zero
+	/*s6 = 0, s7为1*/
 3:	bge	s6, s7, _start_hang
 
 	/* Find the scratch space based on HART index */
+	/*
+	下面这段汇编是计算对应hart的scratch space的地址，
+	然后将地址填入到CSR_MACRATCH寄存器
+	tp = _fw_end
+	s7为hart count，s8为每个hart的stack_size大小8K
+	*/
 	lla	tp, _fw_end
 	mul	a5, s7, s8
 	add	tp, tp, a5
@@ -556,9 +599,11 @@ _start_warm:
 	csrw	CSR_MSCRATCH, tp
 
 	/* Setup stack */
+	/*设置好栈空间*/
 	add	sp, tp, zero
 
 	/* Setup trap handler */
+	/*加载trap处理函数地址到a4*/
 	lla	a4, _trap_handler
 #if __riscv_xlen == 32
 	csrr	a5, CSR_MISA
@@ -568,6 +613,7 @@ _start_warm:
 	lla	a4, _trap_handler_rv32_hyp
 _skip_trap_handler_rv32_hyp:
 #endif
+	/*设置trap处理函数地址到mtvec寄存器(机器trap向量基地址寄存器)*/
 	csrw	CSR_MTVEC, a4
 
 #if __riscv_xlen == 32
@@ -583,6 +629,7 @@ _skip_trap_exit_rv32_hyp:
 #endif
 
 	/* Initialize SBI runtime */
+	/* 初始化sbi runtime*/
 	csrr	a0, CSR_MSCRATCH
 	call	sbi_init
 

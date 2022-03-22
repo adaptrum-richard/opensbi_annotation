@@ -71,6 +71,10 @@ static u32 generic_hart_index2id[SBI_HARTMASK_MAX_BITS] = { 0 };
  * FDT is unchanged (or FDT is modified in-place) then fw_platform_init()
  * can always return the original FDT location (i.e. 'arg1') unmodified.
  */
+ /*
+	1. hardid通过a0寄存器传递。
+	2. 通过a1寄存器在内存中的设备树blob地址。地址必须对齐到8个字节。
+ */
 unsigned long fw_platform_init(unsigned long arg0, unsigned long arg1,
 				unsigned long arg2, unsigned long arg3,
 				unsigned long arg4)
