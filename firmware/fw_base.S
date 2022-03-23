@@ -58,7 +58,9 @@ _start:
 	MOV_3R	a0, s0, a1, s1, a2, s2
 	li	a7, -1
 	beq	a6, a7, _try_lottery
-	/* Jump to relocation wait loop if we are not boot hart */
+	/* Jump to relocation wait loop if we are not boot hart 
+	如果不是被挑选启动的hart，则跳转到relocation wait等候
+	*/
 	bne	a0, a6, _wait_relocate_copy_done
 _try_lottery:
 	/* Jump to relocation wait loop if we don't get relocation lottery */
@@ -518,6 +520,7 @@ _fdt_reloc_done:
 	j	_start_warm
 
 	/* waiting for boot hart to be done (_boot_status == 2) */
+	/*非指定启动的hart，在这里检测boot状态值是否为2，为2的话就进行warm start*/
 _wait_for_boot_hart:
 	li	t0, BOOT_STATUS_BOOT_HART_DONE
 	lla	t1, _boot_status
