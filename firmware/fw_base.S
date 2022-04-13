@@ -66,7 +66,9 @@ _try_lottery:
 	/* Jump to relocation wait loop if we don't get relocation lottery */
 	lla	a6, _relocate_lottery  /*将_relocate_lottery地址加载到a6寄存器，a6寄存器地址中的值为0，lla是伪指令*/
 	li	a7, 1
-	/*先将(a6)的值赋值给a6，然后a6+a7的值赋值给(a6), 这里_relocate_lottery被设置为1*/
+	/*
+	amoadd.w原子加法，哪个hart抢先执行此指令，就成为主hart，其他的hart跳转到_wait_relocate_copy_done
+	先将(a6)中的内容记为t，然后将a7+t的内容写入(a6),然后把t写入a6*/
 	amoadd.w a6, a7, (a6) 
 	/*a6为0，不会跳转到_wait_relocate_copy_done*/
 	bnez	a6, _wait_relocate_copy_done
