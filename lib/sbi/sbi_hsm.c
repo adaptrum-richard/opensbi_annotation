@@ -178,6 +178,12 @@ static int hsm_device_hart_suspend(u32 suspend_type, ulong raddr)
 	return SBI_ENOTSUPP;
 }
 
+/*
+hsm全称：Per hart specific data to manage state transition  每个hart中特殊的数据，用于管理状态转换。
+1. 在每个hart的extra space空间分配一个struct sbi_hsm_data结构体
+2. 设置hart 的状态
+3. 如果热启动的hart则开启ipi，进入wfi状态
+*/
 int sbi_hsm_init(struct sbi_scratch *scratch, u32 hartid, bool cold_boot)
 {
 	u32 i;
@@ -185,6 +191,7 @@ int sbi_hsm_init(struct sbi_scratch *scratch, u32 hartid, bool cold_boot)
 	struct sbi_hsm_data *hdata;
 
 	if (cold_boot) {
+		/*为每一个hart分配一个struct sbi_hsm_data结构体的内存*/
 		hart_data_offset = sbi_scratch_alloc_offset(sizeof(*hdata));
 		if (!hart_data_offset)
 			return SBI_ENOMEM;
@@ -197,12 +204,14 @@ int sbi_hsm_init(struct sbi_scratch *scratch, u32 hartid, bool cold_boot)
 
 			hdata = sbi_scratch_offset_ptr(rscratch,
 						       hart_data_offset);
+			//初始化其状态是PENDING还是STOPPED
 			ATOMIC_INIT(&hdata->state,
 				    (i == hartid) ?
 				    SBI_HSM_STATE_START_PENDING :
 				    SBI_HSM_STATE_STOPPED);
 		}
 	} else {
+		/*开启IPI中断，等待状态不为SBI_HSM_STATE_START_PENDING，否则调用wfi*/
 		sbi_hsm_hart_wait(scratch, hartid);
 	}
 

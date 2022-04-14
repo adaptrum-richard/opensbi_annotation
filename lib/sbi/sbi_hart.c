@@ -37,21 +37,37 @@ struct hart_features {
 };
 static unsigned long hart_features_offset;
 
+/*
+1.是否支持浮点数扩展
+2.是否支持向量扩展
+3.是否支持SCOUNTEREN
+4.是否支持MCOUNTEREN
+5.是否支持MCOUNTINHIBIT
+如果支持则开启
+6.关闭中断
+7.禁止satp
+*/
 static void mstatus_init(struct sbi_scratch *scratch)
 {
 	unsigned long mstatus_val = 0;
 
 	/* Enable FPU */
+	/*是否支持浮点数*/
 	if (misa_extension('D') || misa_extension('F'))
 		mstatus_val |=  MSTATUS_FS;
 
 	/* Enable Vector context */
+	/*是否支持向量扩展*/
 	if (misa_extension('V'))
 		mstatus_val |=  MSTATUS_VS;
 
 	csr_write(CSR_MSTATUS, mstatus_val);
 
 	/* Disable user mode usage of all perf counters except default ones (CY, TM, IR) */
+	/*counter-enable寄存器scounteren是一个32位寄存器，它控制u模式下硬件性能监控计数器的可用性。
+	当scounteren寄存器中的CY、TM、IR或HPMn位被清除时，在u模式下执行时试图读取 cycle、time、instret
+	或hpmcountern寄存器将导致非法指令异常。当这些位中的一个被设置后，就允许访问相应的寄存器
+	*/
 	if (misa_extension('S') &&
 	    sbi_hart_has_feature(scratch, SBI_HART_HAS_SCOUNTEREN))
 		csr_write(CSR_SCOUNTEREN, 7);
@@ -61,10 +77,22 @@ static void mstatus_init(struct sbi_scratch *scratch)
 	 * Supervisor mode usage for all counters are enabled by default
 	 * But counters will not run until mcountinhibit is set.
 	 */
+	/*
+	当清除mcounteren寄存器中的CY、TM、IR或HPMn位时，当以s模式或u模式执行时，试图读取周期、时
+	间、instret或hpmcountern寄存器将导致非法的指令异常。当设置了这些位中的一个，就允许在下一
+	个实现的特权模式中访问相应的寄存器(如果实现了s模式，否则采用u模式)。
+	*/
 	if (sbi_hart_has_feature(scratch, SBI_HART_HAS_MCOUNTEREN))
 		csr_write(CSR_MCOUNTEREN, -1);
 
 	/* All programmable counters will start running at runtime after S-mode request */
+	/*所有可编程计数器将在 S 模式请求后开始运行*/
+	/*
+	寄存器mcountinhibit是一个32位的WARL寄存器，它控制硬件性能监控计数器的增涨。该寄存器中
+	的设置仅控制计数器是否递增;它的可访问性不受此寄存器设置的影响。
+	当清除 mcountinhibit寄存器的CY、IR或HPMn比特位时，cycle、instret或 
+	hpmcounterN寄存器会照样增长，当设置了CY、IR或HPMn时，对应的寄存器不增长。
+	*/
 	if (sbi_hart_has_feature(scratch, SBI_HART_HAS_MCOUNTINHIBIT))
 		csr_write(CSR_MCOUNTINHIBIT, 0xFFFFFFF8);
 
@@ -96,7 +124,9 @@ static int fp_init(struct sbi_scratch *scratch)
 
 	return 0;
 }
-
+/*
+将M模式的中断和异常发送到S模式下执行
+*/
 static int delegate_traps(struct sbi_scratch *scratch)
 {
 	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
@@ -107,10 +137,29 @@ static int delegate_traps(struct sbi_scratch *scratch)
 		return 0;
 
 	/* Send M-mode interrupts and most exceptions to S-mode */
+	/*
+	mideleg寄存器和mip寄存器每个位相对应，
+	SSIP supervisor模式下软件中断的挂起位，可以通过plateform-specific中断控制器设置为1
+	STIP 可通过M-mode的软件传递timer中断到S-mode
+	SEIP mip.SEIP是可写的，并且可以由M-mode软件编写来指示S-mode外部中断正在等待，此外，
+		平台级中断控制器可以产生supervisor-level外部中断，supervisor-level外部中断可以
+		被设置成pending是通过软件程序使用逻辑或SEIP比特位操作和外部中断控制器。当使用
+		CSR指令读取mip寄存器时，SEIP比特位的值保存到rd目的寄存器中，虽然软件可以写SEIP
+		比特位的值且这个SEIP的值受到中断控制的影响，但是中断控制器不能写SEIP的值，仅仅软
+		可以read-modify-write其值，通过CSSRS或CSRRC指令
+	*/
 	interrupts = MIP_SSIP | MIP_STIP | MIP_SEIP;
+	/*sscofpmf是对hpmcounter和mhpmevent csr进行标准化的扩展*/
 	if (sbi_hart_has_feature(scratch, SBI_HART_HAS_SSCOFPMF))
 		interrupts |= MIP_LCOFIP;
-
+	/*
+	CAUSE_MISALIGNED_FETCH  指令地址未对齐异常
+	CAUSE_BREAKPOINT		断点异常
+	CAUSE_USER_ECALL		U模式call异常
+	CAUSE_FETCH_PAGE_FAULT	instruction page fault
+	CAUSE_LOAD_PAGE_FAULT	load page fault
+	CAUSE_STORE_PAGE_FAULT  store page fault
+	*/
 	exceptions = (1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
 		     (1U << CAUSE_USER_ECALL);
 	if (sbi_platform_has_mfaults_delegation(plat))
@@ -332,18 +381,24 @@ done:
 	else
 		sbi_strncpy(features_str, "none", nfstr);
 }
-
+/*
+原理：软件可以通过写入0到pmp0cfg来确定PMP的粒度，然后将所有的1都写入pmpaddr0，
+然后再读回pmpaddr0。如果G是最低有效位集的下标，则PMP粒度为2^(G+2)字节。
+作用：获取CSR_PMPADDR0允许的地址范围
+*/
 static unsigned long hart_pmp_get_allowed_addr(void)
 {
 	unsigned long val = 0;
 	struct sbi_trap_info trap = {0};
 
+	/*这里尝试将0写入CSR_PMPCFG0,然后看是否会出现异常，trap.cause为0，表示没有出现异常*/
 	csr_write_allowed(CSR_PMPCFG0, (ulong)&trap, 0);
 	if (trap.cause)
 		return 0;
-
+	/*向CSR_PMPADDR0中写入PMP_ADDR_MASK，trap.cause为0，表示没有出现异常*/
 	csr_write_allowed(CSR_PMPADDR0, (ulong)&trap, PMP_ADDR_MASK);
 	if (!trap.cause) {
+		/*根据riscv-privileged.pdf第3.7章描述，对CSR_PMPADDR0写入全1后，再读取，可以得到支持的CSR_PMPADDR0*/
 		val = csr_read_allowed(CSR_PMPADDR0, (ulong)&trap);
 		if (trap.cause)
 			val = 0;
@@ -383,6 +438,16 @@ static int hart_pmu_get_allowed_bits(void)
 	return num_bits;
 }
 
+/*
+检测hart 支持的feature
+1. PMPADDR粒度，PMPADDR支持多少个entry
+2. mhpm counters
+3. scounteren
+4. mcounteren
+5. mcountinhibit
+6. sscofpmf 
+7. time CSR 
+*/
 static void hart_detect_features(struct sbi_scratch *scratch)
 {
 	struct sbi_trap_info trap = {0};
@@ -439,9 +504,14 @@ static void hart_detect_features(struct sbi_scratch *scratch)
 	 */
 	val = hart_pmp_get_allowed_addr();
 	if (val) {
-		hfeatures->pmp_gran =  1 << (__ffs(val) + 2);
+		/*__ffs()找到从左边到右边第一个1的位置，__fls()找到从左边到右边最后一个1的位置，
+		如：0x1ff，__ffs()返回0， __fls()返回8*/
+		hfeatures->pmp_gran =  1 << (__ffs(val) + 2); //PMPADDR粒度
 		hfeatures->pmp_addr_bits = __fls(val) + 1;
-		/* Detect number of PMP regions. At least PMPADDR0 should be implemented*/
+		/* Detect number of PMP regions. At least PMPADDR0 should be implemented
+		检测最大支持到CSR_PMPADDRi，这里就让CSR_PMPADDR的地址依次增加，然后一个一个探测，
+		并把最大支持到的个数放入hfeatures->pmp_count中。
+		*/
 		__check_csr_64(CSR_PMPADDR0, 0, val, pmp_count, __pmp_skip);
 	}
 __pmp_skip:
@@ -508,6 +578,17 @@ __mhpm_skip:
 		hfeatures->features |= SBI_HART_HAS_TIME;
 }
 
+/*
+1.是否支持浮点数扩展
+2.是否支持向量扩展
+3.是否支持SCOUNTEREN
+4.是否支持MCOUNTEREN
+5.是否支持MCOUNTINHIBIT
+如果支持则开启
+6.关闭中断
+7.禁止satp
+8.将M模式的中断和异常发送到S模式下执行
+*/
 int sbi_hart_reinit(struct sbi_scratch *scratch)
 {
 	int rc;
@@ -524,19 +605,34 @@ int sbi_hart_reinit(struct sbi_scratch *scratch)
 
 	return 0;
 }
-
+/*
+1.支持hypervisor扩展模式的话，设置trap_hext
+2.分配在扩展区域分配struct hart_features结构体
+3.记录feature到struct hart_features结构体中
+4.1.是否支持浮点数扩展
+4.2.是否支持向量扩展
+4.3.是否支持SCOUNTEREN
+4.4.是否支持MCOUNTEREN
+4.5.是否支持MCOUNTINHIBIT
+    如果支持则开启
+4.6.关闭中断
+4.7.禁止satp
+4.8.将M模式的中断和异常发送到S模式下执行
+*/
 int sbi_hart_init(struct sbi_scratch *scratch, bool cold_boot)
 {
 	if (cold_boot) {
+		/*判断是否支持Hypervisor extension*/
 		if (misa_extension('H'))
 			sbi_hart_expected_trap = &__sbi_expected_trap_hext;
 
+		//在扩展区域分配struct hart_features结构体
 		hart_features_offset = sbi_scratch_alloc_offset(
 						sizeof(struct hart_features));
 		if (!hart_features_offset)
 			return SBI_ENOMEM;
 	}
-
+	//检测hart支持的feature，并记录支持的feature到struct hart_features中
 	hart_detect_features(scratch);
 
 	return sbi_hart_reinit(scratch);

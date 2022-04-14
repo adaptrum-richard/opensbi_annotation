@@ -78,7 +78,7 @@ void sbi_domain_memregion_init(unsigned long addr,
 				struct sbi_domain_memregion *reg)
 {
 	unsigned long base = 0, order;
-
+	/*log2roundup函数计算一个2的order次方的值，能覆盖完size*/
 	for (order = log2roundup(size) ; order <= __riscv_xlen; order++) {
 		if (order < __riscv_xlen) {
 			base = addr & ~((1UL << order) - 1UL);
@@ -93,7 +93,7 @@ void sbi_domain_memregion_init(unsigned long addr,
 		}
 
 	}
-
+	//填充base，order
 	if (reg) {
 		reg->base = base;
 		reg->order = order;
@@ -194,7 +194,14 @@ static bool is_region_before(const struct sbi_domain_memregion *regA,
 
 	return FALSE;
 }
-
+/*
+1.检测sbi_domain是否设置了possible harts
+2.检测sbi_domain是否设置memory regions
+3.检测firmware regions是否存在
+4.对memory regions排序
+5.检测next_mode是否是S或U
+5.检测next_addr和权限是否匹配
+*/
 static int sanitize_domain(const struct sbi_platform *plat,
 			   struct sbi_domain *dom)
 {
@@ -233,6 +240,7 @@ static int sanitize_domain(const struct sbi_platform *plat,
 	}
 
 	/* Count memory regions and check presence of firmware region */
+	/*计算内存区域并检查固件区域是否存在  */
 	count = 0;
 	have_fw_reg = FALSE;
 	sbi_domain_for_each_memregion(dom, reg) {
@@ -249,6 +257,7 @@ static int sanitize_domain(const struct sbi_platform *plat,
 	}
 
 	/* Sort the memory regions */
+	/* 对内存区域进行排序 */
 	for (i = 0; i < (count - 1); i++) {
 		reg = &dom->regions[i];
 		for (j = i + 1; j < count; j++) {
@@ -285,6 +294,14 @@ static int sanitize_domain(const struct sbi_platform *plat,
 	 * We only allow next mode to be S-mode or U-mode.so that we can
 	 * protect M-mode context and enforce checks on memory accesses.
 	 */
+	/*
+	我们不需要检查域的boot HART id，因为如果引导 HART id 不可能/分配给该域，
+	那么它将不会在引导时由 sbi_domain_finalize() 启动。
+ 
+  	检查下一个模式
+
+  	我们只允许下一个模式为 S-mode 或 U-mode。这样我们就可以保护 M-mode 上下文并强制检查内存访问。
+	*/
 	if (dom->next_mode != PRV_S &&
 	    dom->next_mode != PRV_U) {
 		sbi_printf("%s: %s invalid next booting stage mode 0x%lx\n",
@@ -430,6 +447,8 @@ int sbi_domain_register(struct sbi_domain *dom,
 	sbi_hartmask_clear_all(&dom->assigned_harts);
 
 	/* Assign domain to HART if HART is a possible HART */
+	/*从遍历assign_mask(root_hmask)bits数组，找到对应的hart，将hartid_to_domain_table[]
+		和sbi_domain 联系起来*/
 	sbi_hartmask_for_each_hart(i, assign_mask) {
 		if (!sbi_hartmask_test_hart(i, dom->possible_harts))
 			continue;
@@ -585,8 +604,10 @@ int sbi_domain_init(struct sbi_scratch *scratch, u32 cold_hartid)
 	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
 
 	/* Root domain firmware memory region */
+	/*初始化root_fw_region，填充base和order、flags*/
 	sbi_domain_memregion_init(scratch->fw_start, scratch->fw_size, 0,
 				  &root_fw_region);
+	/*将root_fw_region拷贝到root_memregs[]数组中*/
 	domain_memregion_initfw(&root_memregs[root_memregs_count++]);
 
 	/* Root domain allow everything memory region */

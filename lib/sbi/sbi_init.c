@@ -252,6 +252,7 @@ static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
 	if (rc)
 		sbi_hart_hang();
 
+	/*virt platform是空函数*/
 	rc = sbi_platform_early_init(plat, TRUE);
 	if (rc)
 		sbi_hart_hang();
@@ -454,17 +455,30 @@ static atomic_t coldboot_lottery = ATOMIC_INITIALIZER(0);
  *
  * @param scratch pointer to sbi_scratch of current HART
  */
+ /*
+ 为当前的HART初始化OpenSBI库并跳转到下一个启动阶段。  
+执行此函数的前提条件：
+1.mscratch CSR寄存器指向当前hart的sbi_scratch结构体
+2.当前hart的栈指针已经被初始化了
+3.中断被禁止(mstatus CSR中操作)
+4.所有中断被禁止(mei CSR中操作)
+参数scratch执行当前hart的sbi_scratch
+以上操作均已经在fw_base.S文件中完成。
+ */
 void __noreturn sbi_init(struct sbi_scratch *scratch)
 {
 	bool next_mode_supported	= FALSE;
 	bool coldboot			= FALSE;
+	/*得到当前hart的id*/
 	u32 hartid			= current_hartid();
+	/*通过scratch参数找到sbi_platform结构体*/
 	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
 
 	if ((SBI_HARTMASK_MAX_BITS <= hartid) ||
 	    sbi_platform_hart_invalid(plat, hartid))
 		sbi_hart_hang();
 
+	/*在virt平台上，scratch->next_mode为PRV_S*/
 	switch (scratch->next_mode) {
 	case PRV_M:
 		next_mode_supported = TRUE;
@@ -490,7 +504,14 @@ void __noreturn sbi_init(struct sbi_scratch *scratch)
 	 * We use a lottery mechanism to select coldboot HART among
 	 * HARTs which satisfy above condition.
 	 */
-
+	 /*
+	 只有在scratch->next_mode 中指定的HART 支持权限模式才能被允许成为冷
+	 启动HART，因为冷启动HART 将直接跳转到下一个启动阶段。
+	 我们使用抽签机制在满足上述条件的 HART 中选择冷启动 HART。
+	 */
+	/*atomic_xchg 将1赋值给coldboot_lottery->counter，然后将旧值返回
+	哪个hart抢先执行atomic_xchg，则就是冷启动hart
+	*/
 	if (next_mode_supported && atomic_xchg(&coldboot_lottery, 1) == 0)
 		coldboot = TRUE;
 
